@@ -1,13 +1,14 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>School RFID Attendance V3</title>
+    <title>School RFID Attendance V4 (Edit/Delete)</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; background-color: #f0f2f5; }
         .container { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 20px; }
-        h1, h2 { color: #2c3e50; text-align: center; margin-bottom: 1.5rem; }
+        h1, h2, h3 { color: #2c3e50; text-align: center; margin-bottom: 1.5rem; }
         
         /* Input Styling */
         .form-group { margin-bottom: 10px; }
@@ -39,6 +40,13 @@
         /* Grid for Form */
         .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
         @media (max-width: 600px) { .form-grid { grid-template-columns: 1fr; } }
+
+        /* Action Buttons (Edit/Delete) */
+        .btn-action { padding: 8px 12px; font-size: 14px; margin-right: 5px; width: auto; display: inline-block; }
+        .btn-edit { background-color: #f39c12; }
+        .btn-edit:hover { background-color: #e67e22; }
+        .btn-delete { background-color: #e74c3c; }
+        .btn-delete:hover { background-color: #c0392b; }
     </style>
 </head>
 <body>
@@ -55,7 +63,7 @@
     <table id="attendanceTable">
         <thead>
             <tr>
-                <th>Photo</th>
+                <th width="60">Photo</th>
                 <th>Time</th>
                 <th>Name</th>
                 <th>Grade</th>
@@ -69,7 +77,7 @@
 
 <div class="container admin-box">
     <div class="admin-title">Teacher Control Panel</div>
-    <h2>➕ Register New Student</h2>
+    <h2 id="formTitle">➕ Register / Edit Student</h2>
     
     <div class="form-grid">
         <input type="text" id="regName" placeholder="Full Name (e.g. Somchai)">
@@ -87,15 +95,33 @@
 
     <label style="display:block; margin-top:10px; font-size:0.9em; color:#555;">Profile Photo:</label>
     <input type="file" id="regPhoto" accept="image/*">
+    <div id="photoPreviewInfo" style="font-size:0.8em; color:#666; display:none;">(Leave empty to keep current photo)</div>
 
-    <input type="text" id="regTag" placeholder="Click here & Scan Card to Register..." style="background-color: #fffde7;">
+    <input type="text" id="regTag" placeholder="Click here & Scan Card..." style="background-color: #fffde7;">
     
-    <button onclick="registerStudent()">Save Student Profile</button>
+    <button onclick="registerStudent()">Save / Update Student</button>
+
+    <hr style="margin: 30px 0; border: 0; border-top: 1px solid #ddd;">
+
+    <h3>📋 All Registered Students</h3>
+    <table id="studentListTable">
+        <thead>
+            <tr>
+                <th width="60">Photo</th>
+                <th>Name</th>
+                <th>Grade</th>
+                <th>Tag ID</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            </tbody>
+    </table>
 </div>
 
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-  import { getFirestore, collection, addDoc, setDoc, doc, onSnapshot, query, orderBy, limit, serverTimestamp } 
+  import { getFirestore, collection, addDoc, setDoc, doc, deleteDoc, onSnapshot, query, orderBy, limit, serverTimestamp } 
     from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
   // --- PASTE YOUR FIREBASE CONFIG HERE ---
@@ -122,23 +148,49 @@ const firebaseConfig = {
       reader.onerror = error => reject(error);
   });
 
-  // --- 2. STUDENT DIRECTORY (The "Phonebook") ---
-  // Now stores Name, Grade, AND Photo
+  // --- 2. STUDENT DIRECTORY (Local Cache) ---
   let studentDirectory = {}; 
 
+  // Listen to the 'students' collection for ALL changes
   onSnapshot(collection(db, "students"), (snapshot) => {
-      snapshot.forEach((doc) => {
-          const d = doc.data();
-          studentDirectory[doc.id] = {
+      studentDirectory = {}; // Reset cache
+      const tbody = document.querySelector('#studentListTable tbody');
+      tbody.innerHTML = '';
+
+      snapshot.forEach((docSnap) => {
+          const d = docSnap.data();
+          const id = docSnap.id;
+          
+          // Store in object
+          studentDirectory[id] = {
               name: d.name,
               grade: d.grade || "N/A",
-              photo: d.photo || null // Base64 string
+              photo: d.photo || null 
           };
+
+          // Render Table Row
+          let imgHtml = `<div class="no-pic">?</div>`;
+          if (d.photo) {
+              imgHtml = `<img src="${d.photo}" class="profile-pic">`;
+          }
+
+          const row = `
+            <tr>
+                <td>${imgHtml}</td>
+                <td style="font-weight:bold;">${d.name}</td>
+                <td>${d.grade}</td>
+                <td style="font-family:monospace; color:#666;">${id}</td>
+                <td>
+                    <button class="btn-action btn-edit" onclick="editStudent('${id}')">✏️ Edit</button>
+                    <button class="btn-action btn-delete" onclick="deleteStudent('${id}')">🗑️ Del</button>
+                </td>
+            </tr>`;
+          tbody.innerHTML += row;
       });
-      console.log("Directory updated:", Object.keys(studentDirectory).length + " students loaded.");
+      console.log("Directory updated.");
   });
 
-  // --- 3. REGISTRATION LOGIC ---
+  // --- 3. REGISTRATION / UPDATE LOGIC ---
   window.registerStudent = async function() {
       const name = document.getElementById('regName').value.trim();
       const grade = document.getElementById('regGrade').value;
@@ -150,45 +202,92 @@ const firebaseConfig = {
           return;
       }
 
-      // Check if file is too big (Optional safety check: Limit to 500KB)
+      // Image Handling
       if (photoFile && photoFile.size > 500 * 1024) {
           alert("Photo is too large! Please use a smaller image (under 500KB).");
           return;
       }
 
       let photoBase64 = null;
+      
+      // If uploading new photo, convert it
       if (photoFile) {
           try {
               photoBase64 = await toBase64(photoFile);
           } catch(e) {
-              console.error("Error processing image", e);
               alert("Error processing image file.");
               return;
+          }
+      } else {
+          // If editing and NO new photo, try to keep the old one
+          if (studentDirectory[tagId] && studentDirectory[tagId].photo) {
+              photoBase64 = studentDirectory[tagId].photo;
           }
       }
 
       try {
-          // Save all details to 'students' collection
           await setDoc(doc(db, "students", tagId), {
               name: name,
               grade: grade,
-              photo: photoBase64, // Storing the image string directly
-              registeredAt: serverTimestamp()
+              photo: photoBase64, // Saves new photo OR old photo OR null
+              updatedAt: serverTimestamp()
           });
           
-          alert(`✅ Success! ${name} (${grade}) registered.`);
+          alert(`✅ Saved: ${name} (${grade})`);
+          
           // Clear inputs
           document.getElementById('regName').value = '';
           document.getElementById('regGrade').value = '';
           document.getElementById('regTag').value = '';
-          document.getElementById('regPhoto').value = ''; // Reset file input
+          document.getElementById('regPhoto').value = ''; 
+          document.getElementById('photoPreviewInfo').style.display = 'none';
+          document.getElementById('formTitle').innerText = "➕ Register New Student";
+
       } catch (e) {
           console.error("Error: ", e);
-          alert("❌ Error registering student.");
+          alert("❌ Error saving student.");
       }
   }
 
-  // --- 4. ATTENDANCE LOGIC ---
+  // --- 4. EDIT & DELETE FUNCTIONS ---
+  
+  // EDIT: Populates the form
+  window.editStudent = function(id) {
+      const student = studentDirectory[id];
+      if (!student) return;
+
+      // Scroll to top of admin box
+      document.querySelector('.admin-box').scrollIntoView({ behavior: 'smooth' });
+
+      // Populate fields
+      document.getElementById('regName').value = student.name;
+      document.getElementById('regGrade').value = student.grade;
+      document.getElementById('regTag').value = id;
+      
+      // UI Hint
+      document.getElementById('formTitle').innerText = "✏️ Editing: " + student.name;
+      document.getElementById('photoPreviewInfo').style.display = 'block';
+      
+      alert(`Editing ${student.name}. Change details above and click 'Save'.`);
+  }
+
+  // DELETE: Removes from Firebase
+  window.deleteStudent = async function(id) {
+      const student = studentDirectory[id];
+      const confirmMsg = `Are you sure you want to delete?\n\nName: ${student.name}\nID: ${id}`;
+      
+      if (confirm(confirmMsg)) {
+          try {
+              await deleteDoc(doc(db, "students", id));
+              // alert("Student deleted."); // Snapshot listener will update table automatically
+          } catch (e) {
+              console.error("Error deleting:", e);
+              alert("Failed to delete.");
+          }
+      }
+  }
+
+  // --- 5. ATTENDANCE LOGIC ---
   const attendanceInput = document.getElementById('attendanceInput');
   const statusDiv = document.getElementById('status');
 
@@ -203,7 +302,6 @@ const firebaseConfig = {
   });
 
   async function markAttendance(id) {
-      // Look up student details
       const student = studentDirectory[id];
       
       const studentName = student ? student.name : "Unknown Student";
@@ -215,7 +313,7 @@ const firebaseConfig = {
               tag_id: id,
               student_name: studentName,
               student_grade: studentGrade,
-              student_photo: studentPhoto, // We snapshot the photo so logs keep working even if profile changes
+              student_photo: studentPhoto, 
               timestamp: serverTimestamp()
           });
           
@@ -237,7 +335,7 @@ const firebaseConfig = {
       setTimeout(() => { statusDiv.style.display = 'none'; }, 3000);
   }
 
-  // --- 5. SHOW TABLE ---
+  // --- 6. LIVE ATTENDANCE TABLE ---
   const q = query(collection(db, "attendance"), orderBy("timestamp", "desc"), limit(10));
   
   onSnapshot(q, (snapshot) => {
@@ -249,7 +347,6 @@ const firebaseConfig = {
           let dateStr = "Just now";
           if (data.timestamp) dateStr = data.timestamp.toDate().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
 
-          // Handle Photo Logic
           let imgHtml = `<div class="no-pic">?</div>`;
           if (data.student_photo) {
               imgHtml = `<img src="${data.student_photo}" class="profile-pic">`;
@@ -269,3 +366,5 @@ const firebaseConfig = {
 
 </body>
 </html>
+
+```
